@@ -7,17 +7,18 @@ on:
     branches: [main, master]
 
 env:
-  # Real Cloud SQL database for Prisma generate/type checks
-  DATABASE_URL: postgresql://postgres:jgvdVyC3fuqrJOPQ435K@35.253.43.59:5432/lance?schema=public
   # Real Cloud Run Backend URL for the Frontend
   NEXT_PUBLIC_API_URL: https://lance-api-641037923100.us-central1.run.app
   
-  # Existing mock/contract env vars
-  JUDGE_AUTHORITY_SECRET: SBU6F23AV5T5E6AXK2J5C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6
+  # Securely injected via GitHub Actions Secrets
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  JUDGE_AUTHORITY_SECRET: ${{ secrets.JUDGE_AUTHORITY_SECRET }}
+  OPENCLAW_API_KEY: ${{ secrets.OPENCLAW_API_KEY }}
+  
+  # Contract IDs (Public information, safe to commit)
   ESCROW_CONTRACT_ID: CD5E6AXK2J5C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6
   REPUTATION_CONTRACT_ID: CD5E6AXK2J5C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6
   JOB_REGISTRY_CONTRACT_ID: CD5E6AXK2J5C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6C6A6
-  OPENCLAW_API_KEY: test_key
   OPENCLAW_BASE_URL: http://localhost:8080
 
 jobs:
