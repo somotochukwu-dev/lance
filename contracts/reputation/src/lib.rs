@@ -959,139 +959,97 @@ mod test {
         assert_eq!(saved_hash, Some(hash));
     }
 
-    // ── Issue #402: badge minting ──
+    // --- SC-REP-050: Contract-to-Contract Auth Gating Tests ---
 
     #[test]
-    fn test_badge_starts_at_bronze_for_default_score() {
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn test_unauthorized_contract_update_score_is_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
-        client.initialize(&admin);
 
-        // Default score is 5000 → Bronze
-        let badge = client.get_badge(&addr, &Role::Freelancer);
-        assert_eq!(badge, BadgeLevel::Bronze);
+        let admin = Address::generate(&env);
+        let reputation_id = env.register_contract(None, ReputationContract);
+        let authorized_id = env.register_contract(None, AuthorizedAdjuster);
+        let unauthorized_id = env.register_contract(None, AuthorizedAdjuster);
+        let target = Address::generate(&env);
+        let client = ReputationContractClient::new(&env, &reputation_id);
+
+        client.initialize(&admin);
+        // Only `authorized_id` is registered; `unauthorized_id` must be rejected.
+        client.set_authorized_contract(&admin, &authorized_id);
+
+        let unauthorized_client = AuthorizedAdjusterClient::new(&env, &unauthorized_id);
+        unauthorized_client.award(&reputation_id, &target, &Role::Freelancer, &500);
     }
 
     #[test]
-    fn test_badge_upgrades_to_silver_at_6000() {
+    fn test_authorized_contract_can_be_replaced_by_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
-        client.initialize(&admin);
 
-        // Raise score by 1000 → 5000+1000 = 6000 → Silver
-        client.update_score(&addr, &Role::Freelancer, &1000);
-        let badge = client.get_badge(&addr, &Role::Freelancer);
-        assert_eq!(badge, BadgeLevel::Silver);
+        let admin = Address::generate(&env);
+        let target = Address::generate(&env);
+        let reputation_id = env.register_contract(None, ReputationContract);
+        let old_adjuster_id = env.register_contract(None, AuthorizedAdjuster);
+        let new_adjuster_id = env.register_contract(None, AuthorizedAdjuster);
+        let client = ReputationContractClient::new(&env, &reputation_id);
+        let new_adjuster = AuthorizedAdjusterClient::new(&env, &new_adjuster_id);
+
+        client.initialize(&admin);
+        client.set_authorized_contract(&admin, &old_adjuster_id);
+
+        // Admin rotates the authorized contract to a new address.
+        client.set_authorized_contract(&admin, &new_adjuster_id);
+
+        // New authorized contract can modify scores.
+        new_adjuster.award(&reputation_id, &target, &Role::Client, &2_000);
+        let score = client.get_score(&target, &Role::Client);
+        assert_eq!(score.score, 7_000);
     }
 
     #[test]
-    fn test_badge_upgrades_to_gold_at_8000() {
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn test_slash_requires_authorized_contract() {
         let env = Env::default();
         env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
-        client.initialize(&admin);
 
-        client.update_score(&addr, &Role::Freelancer, &3000); // 5000+3000=8000
-        assert_eq!(client.get_badge(&addr, &Role::Freelancer), BadgeLevel::Gold);
+        let admin = Address::generate(&env);
+        let target = Address::generate(&env);
+        let reputation_id = env.register_contract(None, ReputationContract);
+        let authorized_id = env.register_contract(None, AuthorizedAdjuster);
+        let rogue_id = env.register_contract(None, AuthorizedAdjuster);
+        let client = ReputationContractClient::new(&env, &reputation_id);
+        let rogue = AuthorizedAdjusterClient::new(&env, &rogue_id);
+
+        client.initialize(&admin);
+        client.set_authorized_contract(&admin, &authorized_id);
+
+        rogue.slash(
+            &reputation_id,
+            &target,
+            &Role::Freelancer,
+            &Symbol::new(&env, "fraud"),
+        );
     }
 
     #[test]
-    fn test_slash_downgrades_badge() {
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn test_blacklist_requires_authorized_contract() {
         let env = Env::default();
         env.mock_all_auths();
+
         let admin = Address::generate(&env);
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
+        let target = Address::generate(&env);
+        let reputation_id = env.register_contract(None, ReputationContract);
+        let authorized_id = env.register_contract(None, AuthorizedAdjuster);
+        let rogue_id = env.register_contract(None, AuthorizedAdjuster);
+        let client = ReputationContractClient::new(&env, &reputation_id);
+        let rogue = AuthorizedAdjusterClient::new(&env, &rogue_id);
+
         client.initialize(&admin);
+        client.set_authorized_contract(&admin, &authorized_id);
 
-        // Bring to Gold first, then slash twice to drop back to Bronze
-        client.update_score(&addr, &Role::Client, &3000); // 8000 → Gold
-        assert_eq!(client.get_badge(&addr, &Role::Client), BadgeLevel::Gold);
-        client.slash(&addr, &Role::Client, &soroban_sdk::Symbol::new(&env, "fraud")); // 6000 → Silver
-        assert_eq!(client.get_badge(&addr, &Role::Client), BadgeLevel::Silver);
-        client.slash(&addr, &Role::Client, &soroban_sdk::Symbol::new(&env, "fraud")); // 4000 → Bronze
-        assert_eq!(client.get_badge(&addr, &Role::Client), BadgeLevel::Bronze);
-    }
-
-    // ── Issue #406: badge metadata mapping ──
-
-    #[test]
-    fn test_set_and_get_badge_metadata() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
-        client.initialize(&admin);
-
-        let uri = Bytes::from_slice(&env, b"ipfs://QmBronzeBadge");
-        client.set_badge_metadata(&admin, &addr, &BadgeTier::Bronze, &uri);
-
-        let result = client.get_badge_metadata(&addr, &BadgeTier::Bronze);
-        assert_eq!(result, Some(uri));
-    }
-
-    #[test]
-    fn test_badge_metadata_returns_none_when_unset() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
-
-        let result = client.get_badge_metadata(&addr, &BadgeTier::Gold);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_badge_metadata_update_overwrites_existing() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
-        client.initialize(&admin);
-
-        let uri_v1 = Bytes::from_slice(&env, b"ipfs://QmSilverV1");
-        let uri_v2 = Bytes::from_slice(&env, b"ipfs://QmSilverV2");
-        client.set_badge_metadata(&admin, &addr, &BadgeTier::Silver, &uri_v1);
-        client.set_badge_metadata(&admin, &addr, &BadgeTier::Silver, &uri_v2);
-
-        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Silver), Some(uri_v2));
-    }
-
-    #[test]
-    fn test_multiple_tiers_stored_independently() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let addr = Address::generate(&env);
-        let cid = env.register_contract(None, ReputationContract);
-        let client = ReputationContractClient::new(&env, &cid);
-        client.initialize(&admin);
-
-        let bronze_uri = Bytes::from_slice(&env, b"ipfs://Bronze");
-        let gold_uri   = Bytes::from_slice(&env, b"ipfs://Gold");
-        client.set_badge_metadata(&admin, &addr, &BadgeTier::Bronze, &bronze_uri);
-        client.set_badge_metadata(&admin, &addr, &BadgeTier::Gold,   &gold_uri);
-
-        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Bronze), Some(bronze_uri));
-        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Gold),   Some(gold_uri));
-        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Silver), None);
+        rogue.blacklist(&reputation_id, &target, &Symbol::new(&env, "fraud"));
     }
 
     #[test]

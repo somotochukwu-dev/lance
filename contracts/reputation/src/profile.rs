@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes};
+use soroban_sdk::{contracttype, Address, Bytes, Env};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -99,14 +99,33 @@ pub struct Profile {
 }
 
 impl Profile {
-    pub fn new(address: Address) -> Self {
+    pub fn new(address: Address, env: &Env) -> Self {
         Self {
             address,
             client: RoleMetrics::new(),
             freelancer: RoleMetrics::new(),
             is_blacklisted: false,
             metadata_hash: None,
-            badge_metadata: soroban_sdk::Vec::new(_env),
+            badge_metadata: soroban_sdk::Vec::new(env),
+        }
+    }
+
+    pub fn refresh_badges(&mut self) {
+        self.client.badge_level = Self::compute_badge(&self.client, self.is_blacklisted);
+        self.freelancer.badge_level = Self::compute_badge(&self.freelancer, self.is_blacklisted);
+    }
+
+    fn compute_badge(metrics: &RoleMetrics, is_blacklisted: bool) -> u32 {
+        if is_blacklisted {
+            0
+        } else if metrics.completed_jobs >= 5 && metrics.score >= 9_500 {
+            3
+        } else if metrics.completed_jobs >= 3 && metrics.score >= 8_500 {
+            2
+        } else if metrics.completed_jobs >= 1 && metrics.score >= 7_000 {
+            1
+        } else {
+            0
         }
     }
 }
