@@ -81,7 +81,7 @@ pub struct EscrowJob {
     pub expires_at: u64,
     pub milestones: Vec<Milestone>,
     pub requires_multisig: bool,
-    pub token_decimals: u32,   // populated during deposit via token::Client::decimals()
+    pub token_decimals: u32, // populated during deposit via token::Client::decimals()
     pub dispute_deadline: u64, // 0 = no active dispute; set when dispute is raised/opened
 }
 
@@ -96,7 +96,7 @@ pub struct ContractConfig {
 #[contracttype]
 pub enum DataKey {
     Job(u64),
-    Config,          // Replaces separate Admin + AgentJudge entries
+    Config, // Replaces separate Admin + AgentJudge entries
     JobRegistry,
     Locked,
     MultisigConfig(u64),
@@ -622,8 +622,7 @@ impl EscrowContract {
         milestone.status = MilestoneStatus::Released;
         job.milestones.set(idx, milestone.clone());
 
-        job.released_amount =
-            Self::checked_add_i128(&env, job.released_amount, milestone.amount)?;
+        job.released_amount = Self::checked_add_i128(&env, job.released_amount, milestone.amount)?;
 
         let next_status = if job.released_amount == job.total_amount {
             EscrowStatus::Completed
@@ -859,6 +858,10 @@ impl EscrowContract {
         Self::bump_job_ttl(&env, &key);
         assert!(job.status == EscrowStatus::Disputed, "job not disputed");
 
+        if job.dispute_deadline > 0 && env.ledger().timestamp() > job.dispute_deadline {
+            panic_with_error!(&env, EscrowError::DisputeResolutionExpired);
+        }
+
         let remaining = Self::checked_sub_i128(&env, job.total_amount, job.released_amount)
             .expect("invalid escrow balance state");
         let total_payout = Self::checked_add_i128(&env, payee_amount, payer_amount)
@@ -1088,7 +1091,12 @@ impl EscrowContract {
             token_client.transfer(&env.current_contract_address(), &job.client, &remaining);
         }
 
-        log!(&env, "expire_dispute: job {} refunded {}", job_id, remaining);
+        log!(
+            &env,
+            "expire_dispute: job {} refunded {}",
+            job_id,
+            remaining
+        );
         env.storage().persistent().set(&key, &job);
         Self::bump_job_ttl(&env, &key);
 
@@ -1121,19 +1129,14 @@ impl EscrowContract {
 
     /// Read-only helper exposing active escrow configuration.
     pub fn get_escrow_config(env: Env) -> Result<(Address, Address, Option<Address>), EscrowError> {
-        let admin: Address = env
+        let config: ContractConfig = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .ok_or(EscrowError::NotInitialized)?;
-        let agent_judge: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::AgentJudge)
+            .get(&DataKey::Config)
             .ok_or(EscrowError::NotInitialized)?;
         let job_registry: Option<Address> = env.storage().instance().get(&DataKey::JobRegistry);
         Self::bump_instance_ttl(&env);
-        Ok((admin, agent_judge, job_registry))
+        Ok((config.admin, config.agent_judge, job_registry))
     }
 
     /// Read-only helper exposing unreleased escrow balance for a job.
@@ -2630,7 +2633,8 @@ mod test {
 
         cc.raise_dispute(&1u64, &client);
 
-        env.ledger().set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
 
         cc.resolve_dispute(&1u64, &6000i128, &0i128);
         assert_eq!(cc.get_job(&1u64).status, EscrowStatus::Resolved);
@@ -2659,7 +2663,8 @@ mod test {
         cc.deposit(&1u64, &5000i128);
 
         cc.raise_dispute(&1u64, &client);
-        env.ledger().set_timestamp(env.ledger().timestamp() + 8 * 24 * 60 * 60);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 8 * 24 * 60 * 60);
 
         cc.resolve_dispute(&1u64, &5000i128, &0i128); // DisputeResolutionExpired (#18)
     }
@@ -2689,7 +2694,8 @@ mod test {
         assert_eq!(tc.balance(&client), 92000);
 
         cc.raise_dispute(&1u64, &client);
-        env.ledger().set_timestamp(env.ledger().timestamp() + 8 * 24 * 60 * 60);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 8 * 24 * 60 * 60);
 
         cc.expire_dispute(&1u64);
         assert_eq!(cc.get_job(&1u64).status, EscrowStatus::Refunded);
