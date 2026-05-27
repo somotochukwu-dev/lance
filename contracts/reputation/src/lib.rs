@@ -203,14 +203,14 @@ impl ReputationContract {
         }
     }
 
-    fn role_metrics(profile: &Profile, role: &Role) -> &RoleMetrics {
+    fn role_metrics<'a>(profile: &'a Profile, role: &Role) -> &'a RoleMetrics {
         match role {
             Role::Client => &profile.client,
             Role::Freelancer => &profile.freelancer,
         }
     }
 
-    fn role_metrics_mut(profile: &mut Profile, role: &Role) -> &mut RoleMetrics {
+    fn role_metrics_mut<'a>(profile: &'a mut Profile, role: &Role) -> &'a mut RoleMetrics {
         match role {
             Role::Client => &mut profile.client,
             Role::Freelancer => &mut profile.freelancer,
