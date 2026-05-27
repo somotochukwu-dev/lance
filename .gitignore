@@ -24,3 +24,10 @@
 !.env.example
 
 .vercel
+
+# Issues docs
+/docs/issues/
+/docs/ISSUES_CATALOG.md
+
+# Automation scripts
+/scripts/
