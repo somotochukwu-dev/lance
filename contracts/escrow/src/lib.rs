@@ -3216,4 +3216,485 @@ mod test {
         // The 13th milestone must fail with MaxMilestonesExceeded (#21)
         cc.add_milestone(&1u64, &100i128);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SC-ESC-013: Verify State Machine Integrity across Multi-Milestone Gigs
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Full lifecycle: Setup → Funded → WIP → WIP → Completed.
+    /// Validates status, released_amount, remaining balance, and milestone
+    /// statuses at every intermediate step.
+    #[test]
+    fn test_multi_milestone_full_lifecycle_state_integrity() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+        let tc = token::Client::new(&env, &token_addr);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+
+        // ── Setup phase ──
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Setup);
+        assert_eq!(job.milestones.len(), 0);
+        assert_eq!(job.total_amount, 0);
+        assert_eq!(job.released_amount, 0);
+
+        cc.add_milestone(&1u64, &1000i128);
+        cc.add_milestone(&1u64, &2000i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &4000i128);
+
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.milestones.len(), 4);
+        assert_eq!(job.status, EscrowStatus::Setup);
+
+        // ── Deposit → Funded ──
+        cc.deposit(&1u64, &10_000i128);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Funded);
+        assert_eq!(job.total_amount, 10_000);
+        assert_eq!(job.released_amount, 0);
+        assert_eq!(cc.get_escrow_balance(&1u64), 10_000);
+        assert_eq!(cc.get_remaining_balance(&1u64), 10_000);
+        assert_eq!(tc.balance(&contract_id), 10_000);
+
+        // Verify all milestones are Pending
+        let statuses = cc.get_milestone_status(&1u64);
+        for i in 0..4u32 {
+            assert_eq!(statuses.get(i).unwrap(), MilestoneStatus::Pending);
+        }
+
+        // ── Release milestone 0 → WorkInProgress ──
+        cc.release_milestone(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 1000);
+        assert_eq!(cc.get_escrow_balance(&1u64), 9000);
+        assert_eq!(cc.get_remaining_balance(&1u64), 9000);
+        assert_eq!(tc.balance(&freelancer), 1000);
+
+        let statuses = cc.get_milestone_status(&1u64);
+        assert_eq!(statuses.get(0).unwrap(), MilestoneStatus::Released);
+        assert_eq!(statuses.get(1).unwrap(), MilestoneStatus::Pending);
+        assert_eq!(statuses.get(2).unwrap(), MilestoneStatus::Pending);
+        assert_eq!(statuses.get(3).unwrap(), MilestoneStatus::Pending);
+
+        // ── Release milestone 1 → still WorkInProgress ──
+        cc.release_milestone(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 3000);
+        assert_eq!(cc.get_remaining_balance(&1u64), 7000);
+        assert_eq!(tc.balance(&freelancer), 3000);
+
+        // ── Release milestone 2 → still WorkInProgress ──
+        cc.release_milestone(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 6000);
+        assert_eq!(cc.get_remaining_balance(&1u64), 4000);
+        assert_eq!(tc.balance(&freelancer), 6000);
+
+        // ── Release milestone 3 → Completed ──
+        cc.release_milestone(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Completed);
+        assert_eq!(job.released_amount, 10_000);
+        assert_eq!(cc.get_remaining_balance(&1u64), 0);
+        assert_eq!(tc.balance(&freelancer), 10_000);
+        assert_eq!(tc.balance(&contract_id), 0);
+
+        // All milestones must be Released
+        let statuses = cc.get_milestone_status(&1u64);
+        for i in 0..4u32 {
+            assert_eq!(statuses.get(i).unwrap(), MilestoneStatus::Released);
+        }
+    }
+
+    /// Out-of-order release_funds (explicit index) with state checks at each step.
+    #[test]
+    fn test_out_of_order_release_funds_state_integrity() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+        let tc = token::Client::new(&env, &token_addr);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &1500i128);
+        cc.add_milestone(&1u64, &2500i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.deposit(&1u64, &10_000i128);
+
+        // Release milestone index 3 first (out of order)
+        cc.release_funds(&1u64, &client, &3u32);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 3000);
+        let statuses = cc.get_milestone_status(&1u64);
+        assert_eq!(statuses.get(0).unwrap(), MilestoneStatus::Pending);
+        assert_eq!(statuses.get(3).unwrap(), MilestoneStatus::Released);
+
+        // Release milestone index 1
+        cc.release_funds(&1u64, &client, &1u32);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 5500);
+        assert_eq!(tc.balance(&freelancer), 5500);
+
+        // Release milestone index 0
+        cc.release_funds(&1u64, &client, &0u32);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 7000);
+
+        // Release milestone index 2 — final → Completed
+        cc.release_funds(&1u64, &client, &2u32);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Completed);
+        assert_eq!(job.released_amount, 10_000);
+        assert_eq!(tc.balance(&freelancer), 10_000);
+        assert_eq!(tc.balance(&contract_id), 0);
+
+        // All Released
+        let statuses = cc.get_milestone_status(&1u64);
+        for i in 0..4u32 {
+            assert_eq!(statuses.get(i).unwrap(), MilestoneStatus::Released);
+        }
+    }
+
+    /// Dispute raised mid-WIP after partial milestone releases; verifies balance
+    /// accounting is correct through dispute resolution.
+    #[test]
+    fn test_dispute_mid_wip_partial_milestones_balance_integrity() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+        let tc = token::Client::new(&env, &token_addr);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &2000i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &5000i128);
+        cc.deposit(&1u64, &10_000i128);
+
+        // Release first two milestones
+        cc.release_milestone(&1u64, &client); // 2000
+        cc.release_milestone(&1u64, &client); // 3000
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 5000);
+        assert_eq!(tc.balance(&freelancer), 5000);
+
+        // Raise dispute with 5000 remaining
+        cc.raise_dispute(&1u64, &freelancer);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Disputed);
+        assert_eq!(cc.get_remaining_balance(&1u64), 5000);
+
+        // Milestone statuses: first two Released, third Pending
+        let statuses = cc.get_milestone_status(&1u64);
+        assert_eq!(statuses.get(0).unwrap(), MilestoneStatus::Released);
+        assert_eq!(statuses.get(1).unwrap(), MilestoneStatus::Released);
+        assert_eq!(statuses.get(2).unwrap(), MilestoneStatus::Pending);
+
+        // Resolve: 60/40 split of remaining 5000
+        cc.resolve_dispute(&1u64, &3000i128, &2000i128);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Resolved);
+        // Total released: 5000 (milestones) + 5000 (resolution) = 10000
+        assert_eq!(job.released_amount, 10_000);
+        assert_eq!(tc.balance(&freelancer), 8000);  // 5000 + 3000
+        assert_eq!(tc.balance(&client), 92_000);     // 100000 - 10000 + 2000
+    }
+
+    /// Cancel brief in WorkInProgress state refunds only the unreleased portion.
+    #[test]
+    fn test_cancel_brief_wip_refunds_remaining_only() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+        let tc = token::Client::new(&env, &token_addr);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &2000i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &5000i128);
+        cc.deposit(&1u64, &10_000i128);
+
+        // Release first milestone → WIP
+        cc.release_milestone(&1u64, &client);
+        assert_eq!(tc.balance(&freelancer), 2000);
+        assert_eq!(tc.balance(&client), 90_000);
+
+        // Cancel brief — should refund remaining 8000 to client
+        cc.cancel_brief(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Refunded);
+        assert_eq!(job.released_amount, job.total_amount); // fully accounted
+        assert_eq!(tc.balance(&client), 98_000);  // 90000 + 8000
+        assert_eq!(tc.balance(&freelancer), 2000); // unchanged
+        assert_eq!(tc.balance(&contract_id), 0);   // fully drained
+    }
+
+    /// Amend milestones mid-WIP, then release amended milestones to Completed.
+    /// Validates the state machine remains coherent through amendment.
+    #[test]
+    fn test_amend_milestones_then_complete_state_integrity() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+        let tc = token::Client::new(&env, &token_addr);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &2000i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &5000i128);
+        cc.deposit(&1u64, &10_000i128);
+
+        // Release first milestone
+        cc.release_milestone(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 2000);
+
+        // Amend remaining milestones: 3000+5000=8000 → 4000+4000=8000
+        let new_amounts = soroban_sdk::vec![&env, 4000i128, 4000i128];
+        cc.amend_milestones(&1u64, &new_amounts);
+
+        // Verify structure: 1 Released + 2 new Pending
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.milestones.len(), 3);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 2000);
+
+        let statuses = cc.get_milestone_status(&1u64);
+        assert_eq!(statuses.get(0).unwrap(), MilestoneStatus::Released);
+        assert_eq!(statuses.get(1).unwrap(), MilestoneStatus::Pending);
+        assert_eq!(statuses.get(2).unwrap(), MilestoneStatus::Pending);
+
+        // Release remaining amended milestones
+        cc.release_milestone(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 6000);
+        assert_eq!(tc.balance(&freelancer), 6000);
+
+        cc.release_milestone(&1u64, &client);
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Completed);
+        assert_eq!(job.released_amount, 10_000);
+        assert_eq!(tc.balance(&freelancer), 10_000);
+        assert_eq!(tc.balance(&contract_id), 0);
+    }
+
+    /// Getter consistency: get_escrow_balance and get_remaining_balance match
+    /// across every state transition in a multi-milestone lifecycle.
+    #[test]
+    fn test_getter_consistency_across_transitions() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &4000i128);
+        cc.deposit(&1u64, &10_000i128);
+
+        // Both getters must agree at every step
+        assert_eq!(cc.get_escrow_balance(&1u64), cc.get_remaining_balance(&1u64));
+        assert_eq!(cc.get_escrow_balance(&1u64), 10_000);
+
+        cc.release_milestone(&1u64, &client);
+        assert_eq!(cc.get_escrow_balance(&1u64), cc.get_remaining_balance(&1u64));
+        assert_eq!(cc.get_escrow_balance(&1u64), 7000);
+
+        cc.release_milestone(&1u64, &client);
+        assert_eq!(cc.get_escrow_balance(&1u64), cc.get_remaining_balance(&1u64));
+        assert_eq!(cc.get_escrow_balance(&1u64), 4000);
+
+        cc.release_milestone(&1u64, &client);
+        assert_eq!(cc.get_escrow_balance(&1u64), cc.get_remaining_balance(&1u64));
+        assert_eq!(cc.get_escrow_balance(&1u64), 0);
+
+        // Final state
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::Completed);
+    }
+
+    /// Unauthorized callers are blocked from all state-mutating functions
+    /// on a multi-milestone job.
+    #[test]
+    fn test_unauthorized_state_mutations_blocked_multi_milestone() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let rando = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &5000i128);
+        cc.add_milestone(&1u64, &5000i128);
+        cc.deposit(&1u64, &10_000i128);
+
+        // Release first milestone to enter WIP
+        cc.release_milestone(&1u64, &client);
+        assert_eq!(cc.get_job(&1u64).status, EscrowStatus::WorkInProgress);
+
+        // Verify: release_milestone by rando → Unauthorized (#3)
+        let result = cc.try_release_milestone(&1u64, &rando);
+        assert!(result.is_err());
+
+        // Verify: release_funds by freelancer → Unauthorized (#3)
+        let result = cc.try_release_funds(&1u64, &freelancer, &1u32);
+        assert!(result.is_err());
+
+        // Verify: refund by freelancer → Unauthorized (#3)
+        let result = cc.try_refund(&1u64, &freelancer);
+        assert!(result.is_err());
+
+        // Verify: cancel_brief by rando → Unauthorized (#3)
+        let result = cc.try_cancel_brief(&1u64, &rando);
+        assert!(result.is_err());
+
+        // State is still WIP — no mutation occurred
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, EscrowStatus::WorkInProgress);
+        assert_eq!(job.released_amount, 5000);
+    }
+
+    /// Invalid state transitions are blocked on multi-milestone jobs:
+    /// cannot release after dispute, cannot dispute after completion.
+    #[test]
+    fn test_invalid_transitions_blocked_multi_milestone() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+
+        cc.initialize(&admin, &agent_judge);
+
+        // ── Test 1: Cannot release after dispute ──
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.add_milestone(&1u64, &7000i128);
+        cc.deposit(&1u64, &10_000i128);
+
+        cc.release_milestone(&1u64, &client); // WIP
+        cc.raise_dispute(&1u64, &client);      // Disputed
+        assert_eq!(cc.get_job(&1u64).status, EscrowStatus::Disputed);
+
+        // release_milestone must fail in Disputed state
+        let result = cc.try_release_milestone(&1u64, &client);
+        assert!(result.is_err());
+
+        // release_funds must fail in Disputed state
+        let result = cc.try_release_funds(&1u64, &client, &1u32);
+        assert!(result.is_err());
+
+        // ── Test 2: Cannot dispute after completion ──
+        cc.create_job(&2u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&2u64, &5000i128);
+        cc.add_milestone(&2u64, &5000i128);
+        cc.deposit(&2u64, &10_000i128);
+
+        cc.release_milestone(&2u64, &client);
+        cc.release_milestone(&2u64, &client);
+        assert_eq!(cc.get_job(&2u64).status, EscrowStatus::Completed);
+
+        // raise_dispute must fail in Completed state
+        let result = cc.try_raise_dispute(&2u64, &client);
+        assert!(result.is_err());
+
+        // open_dispute must fail in Completed state
+        let result = cc.try_open_dispute(&2u64, &client);
+        assert!(result.is_err());
+    }
 }
