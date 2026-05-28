@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal,
@@ -1035,7 +1035,7 @@ mod test {
         assert_eq!(saved_hash, Some(hash));
     }
 
-    // ── Issue #402: badge minting ──
+    // ΓöÇΓöÇ Issue #402: badge minting ΓöÇΓöÇ
 
     #[test]
     fn test_badge_starts_at_bronze_for_default_score() {
@@ -1047,7 +1047,7 @@ mod test {
         let client = ReputationContractClient::new(&env, &cid);
         client.initialize(&admin);
 
-        // Default score is 5000 → Bronze
+        // Default score is 5000 ΓåÆ Bronze
         let badge = client.get_badge(&addr, &Role::Freelancer);
         assert_eq!(badge, BadgeLevel::Bronze);
     }
@@ -1063,7 +1063,7 @@ mod test {
         client.initialize(&admin);
         client.set_authorized_contract(&admin, &admin);
 
-        // Raise score by 1000 → 5000+1000 = 6000 → Silver
+        // Raise score by 1000 ΓåÆ 5000+1000 = 6000 ΓåÆ Silver
         client.update_score(&admin, &addr, &Role::Freelancer, &1000);
         let badge = client.get_badge(&addr, &Role::Freelancer);
         assert_eq!(badge, BadgeLevel::Silver);
@@ -1096,15 +1096,15 @@ mod test {
         client.set_authorized_contract(&admin, &admin);
 
         // Bring to Gold first, then slash twice to drop back to Bronze
-        client.update_score(&admin, &addr, &Role::Client, &3000); // 8000 → Gold
+        client.update_score(&admin, &addr, &Role::Client, &3000); // 8000 ΓåÆ Gold
         assert_eq!(client.get_badge(&addr, &Role::Client), BadgeLevel::Gold);
-        client.slash(&admin, &addr, &Role::Client, &soroban_sdk::Symbol::new(&env, "fraud")); // 6000 → Silver
+        client.slash(&admin, &addr, &Role::Client, &soroban_sdk::Symbol::new(&env, "fraud")); // 6000 ΓåÆ Silver
         assert_eq!(client.get_badge(&addr, &Role::Client), BadgeLevel::Silver);
-        client.slash(&admin, &addr, &Role::Client, &soroban_sdk::Symbol::new(&env, "fraud")); // 4000 → Bronze
+        client.slash(&admin, &addr, &Role::Client, &soroban_sdk::Symbol::new(&env, "fraud")); // 4000 ΓåÆ Bronze
         assert_eq!(client.get_badge(&addr, &Role::Client), BadgeLevel::Bronze);
     }
 
-    // ── Issue #406: badge metadata mapping ──
+    // ΓöÇΓöÇ Issue #406: badge metadata mapping ΓöÇΓöÇ
 
     #[test]
     fn test_set_and_get_badge_metadata() {
