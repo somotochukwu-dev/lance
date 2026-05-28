@@ -411,7 +411,6 @@ fn checked_add_i128(
         EscrowError::InvalidInput
     })
 }
-
 fn checked_sub_i128(
     env: &Env,
     a: i128,
@@ -423,6 +422,16 @@ fn checked_sub_i128(
     })
 }
 
+fn checked_sub_i128(
+    env: &Env,
+    a: i128,
+    b: i128,
+) -> Result<i128, EscrowError> {
+    a.checked_sub(b).ok_or_else(|| {
+        log!(env, "checked_sub_i128 underflow: {} - {}", a, b);
+        EscrowError::InvalidInput
+    })
+}
     fn sync_dispute_to_job_registry(env: &Env, job_id: u64) -> Result<(), EscrowError> {
         Self::bump_instance_ttl(env);
         let Some(registry_contract) = env
@@ -672,11 +681,15 @@ let expires_duration = 30u64
     .checked_mul(24)
     .and_then(|h| h.checked_mul(60))
     .and_then(|m| m.checked_mul(60))
-    .ok_or(EscrowError::ArithmeticOverflow)?;
+let expires_duration = 30u64
+    .checked_mul(24)
+    .and_then(|h| h.checked_mul(60))
+    .and_then(|m| m.checked_mul(60))
+    .ok_or(EscrowError::ArithmeticError)?;
 
 let expires_at = now
     .checked_add(expires_duration)
-    .ok_or(EscrowError::ArithmeticOverflow)?;
+    .ok_or(EscrowError::ArithmeticError)?;
 
         let job = EscrowJob {
             client: client.clone(),
