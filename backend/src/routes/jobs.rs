@@ -142,8 +142,12 @@ async fn list_jobs(
         .fetch_all(&state.pool)
         .await?;
 
-    let next_cursor = if jobs.len() > limit as usize {
-        jobs.pop().map(|job| JobCursor {
+    let has_next = jobs.len() > limit as usize;
+    if has_next {
+        jobs.truncate(limit as usize);
+    }
+    let next_cursor = if has_next {
+        jobs.last().map(|job| JobCursor {
             created_at: job.created_at,
             id: job.id,
         })
