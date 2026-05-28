@@ -231,6 +231,38 @@ fn checked_i128_sub(lhs: i128, rhs: i128) -> Result<i128, EscrowError> {
     lhs.checked_sub(rhs).ok_or(EscrowError::MathOverflow)
 }
 
+fn checked_u32_add(lhs: u32, rhs: u32) -> Result<u32, EscrowError> {
+    lhs.checked_add(rhs).ok_or(EscrowError::MathOverflow)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AllocationSplit {
+    payee_amount: i128,
+    payer_amount: i128,
+    total_payout: i128,
+}
+
+fn checked_allocation_split(
+    remaining: i128,
+    payee_amount: i128,
+    payer_amount: i128,
+) -> Result<AllocationSplit, EscrowError> {
+    if payee_amount < 0 || payer_amount < 0 {
+        return Err(EscrowError::InvalidInput);
+    }
+
+    let total_payout = checked_i128_add(payee_amount, payer_amount)?;
+    if total_payout > remaining {
+        return Err(EscrowError::AmountMismatch);
+    }
+
+    Ok(AllocationSplit {
+        payee_amount,
+        payer_amount,
+        total_payout,
+    })
+}
+
 fn view_milestone(record: &MilestoneRecord) -> Milestone {
     Milestone {
         amount: record.amount,
@@ -556,10 +588,7 @@ impl EscrowContract {
             released: false,
         });
         log!(&env, "add_milestone: job {} amount {}", job_id, amount);
-        core.milestone_count = core
-            .milestone_count
-            .checked_add(1)
-            .expect("milestone count overflow");
+        core.milestone_count = checked_u32_add(core.milestone_count, 1).expect("math overflow");
         Self::persist_job(&env, job_id, &core, &milestones);
     }
 
@@ -655,10 +684,7 @@ impl EscrowContract {
         milestones.set(idx, milestone.clone());
 
         core.released_amount = checked_i128_add(core.released_amount, milestone.amount)?;
-        core.released_milestones = core
-            .released_milestones
-            .checked_add(1)
-            .ok_or(EscrowError::MathOverflow)?;
+        core.released_milestones = checked_u32_add(core.released_milestones, 1)?;
 
         let next_status = if core.released_amount == core.total_amount {
             EscrowStatus::Completed
@@ -722,10 +748,8 @@ impl EscrowContract {
 
         core.released_amount =
             checked_i128_add(core.released_amount, milestone.amount).expect("math overflow");
-        core.released_milestones = core
-            .released_milestones
-            .checked_add(1)
-            .expect("math overflow");
+        core.released_milestones =
+            checked_u32_add(core.released_milestones, 1).expect("math overflow");
         let next_status = if core.released_amount == core.total_amount {
             EscrowStatus::Completed
         } else {
@@ -877,29 +901,33 @@ impl EscrowContract {
 
         let remaining = checked_i128_sub(core.total_amount, core.released_amount)
             .expect("invalid released amount");
-        let total_payout = checked_i128_add(payee_amount, payer_amount).expect("math overflow");
-        assert!(total_payout <= remaining, "payout exceeds remaining funds");
+        let allocation = checked_allocation_split(remaining, payee_amount, payer_amount)
+            .expect("invalid allocation split");
 
         let next_status = EscrowStatus::Resolved;
         core.status
             .validate_transition(&next_status)
             .expect("invalid state transition");
         core.released_amount =
-            checked_i128_add(core.released_amount, total_payout).expect("math overflow");
+            checked_i128_add(core.released_amount, allocation.total_payout).expect("math overflow");
         core.status = next_status;
 
         enter_reentrancy_guard(&env);
 
         let token_client = token::Client::new(&env, &core.token);
-        if payee_amount > 0 {
+        if allocation.payee_amount > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
                 &core.freelancer,
-                &payee_amount,
+                &allocation.payee_amount,
             );
         }
-        if payer_amount > 0 {
-            token_client.transfer(&env.current_contract_address(), &core.client, &payer_amount);
+        if allocation.payer_amount > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &core.client,
+                &allocation.payer_amount,
+            );
         }
 
         log!(
@@ -939,7 +967,7 @@ impl EscrowContract {
 
         let next_status = EscrowStatus::Refunded;
         core.status.validate_transition(&next_status)?;
-        core.released_amount = core.total_amount;
+        core.released_amount = checked_i128_add(core.released_amount, remaining)?;
         core.released_milestones = core.milestone_count;
         core.status = next_status;
 
@@ -1826,6 +1854,62 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "Error(Contract, #12)")]
+    fn test_reentrant_resolve_dispute_attack_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = env.register_contract(None, ReentrantTokenContract);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+
+        let token_client = ReentrantTokenContractClient::new(&env, &token_addr);
+        token_client.initialize(&contract_id, &1u64, &client);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &5000i128);
+        cc.deposit(&1u64, &5000i128);
+        cc.raise_dispute(&1u64, &client);
+
+        token_client.arm(&true);
+        cc.resolve_dispute(&1u64, &2500i128, &2500i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid allocation split")]
+    fn test_resolve_dispute_over_allocated_split_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &5000i128);
+        cc.add_milestone(&1u64, &3000i128);
+        cc.deposit(&1u64, &8000i128);
+        cc.raise_dispute(&1u64, &client);
+
+        cc.resolve_dispute(&1u64, &5000i128, &4000i128);
+    }
+
+    #[test]
     fn test_release_funds_gas_budget_stays_below_threshold() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1852,6 +1936,38 @@ mod test {
         env.budget().reset_unlimited();
 
         cc.release_funds(&1u64, &client, &3u32);
+
+        let budget = env.budget();
+        assert!(budget.cpu_instruction_cost() < 1_500_000);
+        assert!(budget.memory_bytes_cost() < 200_000);
+    }
+
+    #[test]
+    fn test_resolve_dispute_gas_budget_stays_below_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let agent_judge = Address::generate(&env);
+        let client = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let token_addr = setup_token(&env, &admin);
+        mint(&env, &token_addr, &client);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let cc = EscrowContractClient::new(&env, &contract_id);
+
+        cc.initialize(&admin, &agent_judge);
+        cc.create_job(&1u64, &client, &freelancer, &token_addr);
+        cc.add_milestone(&1u64, &6000i128);
+        cc.add_milestone(&1u64, &4000i128);
+        cc.deposit(&1u64, &10_000i128);
+        cc.raise_dispute(&1u64, &client);
+
+        env.budget().reset_unlimited();
+
+        cc.resolve_dispute(&1u64, &4000i128, &3000i128);
 
         let budget = env.budget();
         assert!(budget.cpu_instruction_cost() < 1_500_000);
