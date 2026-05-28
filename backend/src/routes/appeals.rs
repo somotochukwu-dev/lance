@@ -22,6 +22,7 @@ pub fn router() -> Router<AppState> {
 ///
 /// Creates an appeal for a dispute whose job budget exceeds the threshold
 /// (1000 USDC in stroops). Only resolved disputes can be appealed.
+#[tracing::instrument(skip(state, req))]
 pub async fn create_appeal(
     State(state): State<AppState>,
     Path(dispute_id): Path<Uuid>,
@@ -99,6 +100,7 @@ pub async fn create_appeal(
 /// An arbiter casts their vote on an open appeal.
 /// When the quorum (3-of-5) is reached the appeal closes and overrides
 /// the original AI judge verdict.
+#[tracing::instrument(skip(state, req))]
 async fn cast_vote(
     State(state): State<AppState>,
     Path(appeal_id): Path<Uuid>,

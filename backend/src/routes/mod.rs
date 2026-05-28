@@ -7,6 +7,7 @@ pub mod evidence;
 pub mod health;
 pub mod jobs;
 pub mod milestones;
+pub mod pagination;
 pub mod uploads;
 pub mod users;
 pub mod verdicts;
@@ -16,17 +17,18 @@ use axum::{routing::get, Router};
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
-        // health check — outside versioned prefix so load balancers can reach it
+        // Legacy health alias for older clients and edge checks.
         .route("/health", get(health::health))
-        // v1 API routes
-        .nest(
-            "/v1",
-            Router::new()
-                .nest("/jobs", jobs::router())
-                .nest("/disputes", disputes::router())
-                .nest("/appeals", appeals::router())
-                .nest("/users", users::router())
-                .nest("/auth", auth::router())
-                .nest("/uploads", uploads::router()),
-        )
+        .nest("/v1", v1_router())
+}
+
+fn v1_router() -> Router<AppState> {
+    Router::new()
+        .route("/health", get(health::health))
+        .nest("/jobs", jobs::router())
+        .nest("/disputes", disputes::router())
+        .nest("/appeals", appeals::router())
+        .nest("/users", users::router())
+        .nest("/auth", auth::router())
+        .nest("/uploads", uploads::router())
 }

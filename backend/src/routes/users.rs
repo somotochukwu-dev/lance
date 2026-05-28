@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     routing::get,
     Json, Router,
@@ -13,6 +13,7 @@ use crate::{
         ProfileJobLedgerEntry, ProfileMetrics, PublicProfile, UpdateProfileRequest,
         UserProfileRecord,
     },
+    routes::pagination::PaginationQuery,
 };
 
 pub fn router() -> Router<AppState> {
@@ -21,18 +22,27 @@ pub fn router() -> Router<AppState> {
         .route("/:address/profile", get(get_profile).put(upsert_profile))
 }
 
-async fn list_users(State(state): State<AppState>) -> Result<Json<Vec<String>>> {
+#[tracing::instrument(skip(state, pagination))]
+async fn list_users(
+    State(state): State<AppState>,
+    Query(pagination): Query<PaginationQuery>,
+) -> Result<Json<Vec<String>>> {
+    let bounds = pagination.bounds();
     let users = sqlx::query_scalar::<_, String>(
         r#"SELECT DISTINCT address
            FROM profiles
-           ORDER BY address ASC"#,
+           ORDER BY address ASC
+           LIMIT $1 OFFSET $2"#,
     )
+    .bind(bounds.limit)
+    .bind(bounds.offset)
     .fetch_all(&state.pool)
     .await?;
 
     Ok(Json(users))
 }
 
+#[tracing::instrument(skip(state))]
 async fn get_profile(
     State(state): State<AppState>,
     Path(address): Path<String>,
@@ -145,6 +155,7 @@ async fn get_profile(
     Ok(Json(response))
 }
 
+#[tracing::instrument(skip(state, headers, req))]
 async fn upsert_profile(
     State(state): State<AppState>,
     Path(address): Path<String>,

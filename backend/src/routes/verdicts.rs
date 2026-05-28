@@ -10,6 +10,7 @@ use crate::{
     models::Verdict,
 };
 
+#[tracing::instrument(skip(state))]
 pub async fn get_verdict(
     State(state): State<AppState>,
     Path(dispute_id): Path<Uuid>,

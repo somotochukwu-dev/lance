@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use uuid::Uuid;
@@ -8,25 +8,33 @@ use crate::{
     db::AppState,
     error::{AppError, Result},
     models::Milestone,
+    routes::pagination::PaginationQuery,
 };
 
+#[tracing::instrument(skip(state, pagination))]
 pub async fn list_milestones(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<Milestone>>> {
+    let bounds = pagination.bounds();
     let milestones = sqlx::query_as::<_, Milestone>(
         r#"SELECT id, job_id, index, title, amount_usdc, status, tx_hash, released_at
            FROM milestones
            WHERE job_id = $1
-           ORDER BY index ASC"#,
+           ORDER BY index ASC, id ASC
+           LIMIT $2 OFFSET $3"#,
     )
     .bind(job_id)
+    .bind(bounds.limit)
+    .bind(bounds.offset)
     .fetch_all(&state.pool)
     .await?;
 
     Ok(Json(milestones))
 }
 
+#[tracing::instrument(skip(state))]
 pub async fn release_milestone(
     State(state): State<AppState>,
     Path((job_id, milestone_id)): Path<(Uuid, Uuid)>,

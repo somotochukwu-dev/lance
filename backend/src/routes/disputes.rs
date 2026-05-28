@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Open a dispute from within the job routes (/jobs/:id/dispute)
+#[tracing::instrument(skip(state, req))]
 pub async fn open_dispute_for_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
@@ -67,6 +68,7 @@ pub async fn open_dispute_for_job(
     Ok(Json(dispute))
 }
 
+#[tracing::instrument(skip(state))]
 async fn get_dispute(
     State(state): State<AppState>,
     Path(dispute_id): Path<Uuid>,
@@ -81,6 +83,7 @@ async fn get_dispute(
     Ok(Json(dispute))
 }
 
+#[tracing::instrument(skip(state))]
 pub async fn get_job_dispute(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,

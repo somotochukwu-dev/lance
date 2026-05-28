@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use uuid::Uuid;
@@ -8,25 +8,33 @@ use crate::{
     db::AppState,
     error::{AppError, Result},
     models::{Deliverable, SubmitDeliverableRequest},
+    routes::pagination::PaginationQuery,
 };
 
+#[tracing::instrument(skip(state, pagination))]
 pub async fn list_deliverables(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<Deliverable>>> {
+    let bounds = pagination.bounds();
     let deliverables = sqlx::query_as::<_, Deliverable>(
         r#"SELECT id, job_id, milestone_index, submitted_by, label, kind, url, file_hash, created_at
            FROM deliverables
            WHERE job_id = $1
-           ORDER BY milestone_index ASC, created_at DESC"#,
+           ORDER BY milestone_index ASC, created_at DESC, id DESC
+           LIMIT $2 OFFSET $3"#,
     )
     .bind(job_id)
+    .bind(bounds.limit)
+    .bind(bounds.offset)
     .fetch_all(&state.pool)
     .await?;
 
     Ok(Json(deliverables))
 }
 
+#[tracing::instrument(skip(state, req))]
 pub async fn submit_deliverable(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,

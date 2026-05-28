@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -9,7 +9,7 @@ use crate::{
     db::AppState,
     error::{AppError, Result},
     models::{CreateJobRequest, Job, MarkJobFundedRequest},
-    routes::{bids, deliverables, milestones},
+    routes::{bids, deliverables, milestones, pagination::PaginationQuery},
 };
 
 pub fn router() -> Router<AppState> {
@@ -35,18 +35,27 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<Job>>> {
+#[tracing::instrument(skip(state, pagination))]
+async fn list_jobs(
+    State(state): State<AppState>,
+    Query(pagination): Query<PaginationQuery>,
+) -> Result<Json<Vec<Job>>> {
+    let bounds = pagination.bounds();
     let jobs = sqlx::query_as::<_, Job>(
         r#"SELECT id, title, description, budget_usdc, milestones, client_address,
                   freelancer_address, status, metadata_hash, on_chain_job_id,
                   created_at, updated_at
-           FROM jobs ORDER BY created_at DESC"#,
+           FROM jobs ORDER BY created_at DESC, id DESC
+           LIMIT $1 OFFSET $2"#,
     )
+    .bind(bounds.limit)
+    .bind(bounds.offset)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(jobs))
 }
 
+#[tracing::instrument(skip(state))]
 async fn get_job(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Job>> {
     let job = sqlx::query_as::<_, Job>(
         r#"SELECT id, title, description, budget_usdc, milestones, client_address,
@@ -61,6 +70,7 @@ async fn get_job(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<
     Ok(Json(job))
 }
 
+#[tracing::instrument(skip(state, req))]
 async fn create_job(
     State(state): State<AppState>,
     Json(req): Json<CreateJobRequest>,
@@ -120,6 +130,7 @@ async fn create_job(
     Ok(Json(job))
 }
 
+#[tracing::instrument(skip(state, req))]
 async fn mark_job_funded(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,

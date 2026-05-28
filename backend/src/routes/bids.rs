@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use uuid::Uuid;
@@ -8,22 +8,32 @@ use crate::{
     db::AppState,
     error::{AppError, Result},
     models::{AcceptBidRequest, Bid, CreateBidRequest, Job},
+    routes::pagination::PaginationQuery,
 };
 
+#[tracing::instrument(skip(state, pagination))]
 pub async fn list_bids(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<Bid>>> {
+    let bounds = pagination.bounds();
     let bids = sqlx::query_as::<_, Bid>(
         r#"SELECT id, job_id, freelancer_address, proposal, proposal_hash, status, created_at
-           FROM bids WHERE job_id = $1 ORDER BY created_at ASC"#,
+           FROM bids
+           WHERE job_id = $1
+           ORDER BY created_at ASC, id ASC
+           LIMIT $2 OFFSET $3"#,
     )
     .bind(job_id)
+    .bind(bounds.limit)
+    .bind(bounds.offset)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(bids))
 }
 
+#[tracing::instrument(skip(state, req))]
 pub async fn create_bid(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
@@ -58,6 +68,7 @@ pub async fn create_bid(
     Ok(Json(bid))
 }
 
+#[tracing::instrument(skip(state, req))]
 pub async fn accept_bid(
     State(state): State<AppState>,
     Path((job_id, bid_id)): Path<(Uuid, Uuid)>,

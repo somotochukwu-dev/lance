@@ -1,10 +1,10 @@
 use axum::Router;
 use dotenvy::dotenv;
-use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod config;
 mod db;
 mod error;
 mod models;
@@ -27,16 +27,16 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&database_url)
-        .await?;
+    let pool_config = config::DatabasePoolConfig::from_env()?;
+    let cors_config = config::CorsConfig::from_env()?;
+
+    let pool = pool_config.connect_pool(&database_url).await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     let state = AppState::new(pool.clone());
     tokio::spawn(worker::run_judge_worker(pool));
-    let app = build_router(state);
+    let app = build_router(state, cors_config);
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3001".to_string())
@@ -49,10 +49,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_router(state: AppState) -> Router {
+fn build_router(state: AppState, cors_config: config::CorsConfig) -> Router {
     Router::new()
         .nest("/api", routes::api_router())
-        .layer(CorsLayer::permissive())
+        .layer(cors_config.layer())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
