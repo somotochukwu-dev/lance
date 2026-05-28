@@ -104,6 +104,8 @@ pub enum DataKey {
     FeeBps,
     MultisigConfig(u64), // Per-job multisig configuration
     UpgradeAdmin,
+    Treasury,
+    FeeBps,
 }
 
 #[contracttype]
@@ -190,6 +192,8 @@ pub enum EscrowError {
     UpgradeAdminNotSet = 18,
     ArithmeticOverflow = 19,
     DisputeResolutionExpired = 20,
+    FeeTooHigh = 21,
+    NothingToSweep = 22,
 }
 
 /// Maximum platform fee, in basis points (100% = 10_000 bps).
@@ -295,6 +299,41 @@ pub struct DisputeExpiredEvent {
     pub refunded_to: Address,
     pub amount: i128,
     pub expired_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeConfigUpdatedEvent {
+    pub treasury: Address,
+    pub fee_bps: u32,
+    pub updated_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct LockupUpdatedEvent {
+    pub job_id: u64,
+    pub expires_at: u64,
+    pub updated_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct EmergencySweepEvent {
+    pub job_id: u64,
+    pub admin: Address,
+    pub rescue_address: Address,
+    pub amount: i128,
+    pub swept_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct MilestonesAmendedEvent {
+    pub job_id: u64,
+    pub milestone_count: u32,
+    pub remaining_amount: i128,
+    pub amended_at: u64,
 }
 
 struct ReentrancyGuard<'a> {
@@ -996,7 +1035,7 @@ if !(job.status == EscrowStatus::Funded
             return Err(EscrowError::InvalidState);
         }
 
-        // 6. Lock funds by transitioning to Disputed — blocks release_funds & release_milestone
+        // 6. Lock funds by transitioning to Disputed ΓÇö blocks release_funds & release_milestone
         let next_status = EscrowStatus::Disputed;
         job.status.validate_transition(&next_status)?;
         job.status = next_status;
@@ -1552,9 +1591,9 @@ exit_reentrancy_guard(&env);
         Ok(config.current_signatures.len() >= config.required_signatures)
     }
 
-    // ─────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // SC-ESC-001: Admin fee splitting
-    // ─────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Admin configures the platform treasury and fee (in basis points).
     /// Once set, milestone releases route `fee_bps` of each payout to the
@@ -1635,7 +1674,7 @@ exit_reentrancy_guard(&env);
 
     // ─────────────────────────────────────────────────────────────────────
     // SC-ESC-002: Dynamic lockup durations
-    // ─────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Client sets a custom lockup duration (in seconds) during Setup. The
     /// job's expiry becomes `created_at + lockup_seconds`. Until expiry the
@@ -1694,9 +1733,9 @@ exit_reentrancy_guard(&env);
         Ok(job.expires_at)
     }
 
-    // ─────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // SC-ESC-003: Emergency escrow sweep (admin-gated)
-    // ─────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Emergency sweep of the entire locked balance for a job to a rescue
     /// address. Only the admin may invoke this. It overrides the active state
@@ -1758,9 +1797,9 @@ exit_reentrancy_guard(&env);
         Ok(())
     }
 
-    // ─────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // SC-ESC-004: Milestone re-allocation / amendment
-    // ─────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Mutually amend the remaining (unreleased) milestone structure. Both the
     /// client and the freelancer must authorize. The sum of the new
@@ -1839,6 +1878,56 @@ exit_reentrancy_guard(&env);
         );
 
         Ok(())
+    }
+
+    fn fee_bps(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
+    }
+
+    fn payout_with_fee(
+        env: &Env,
+        _job_id: u64,
+        job: &EscrowJob,
+        amount: i128,
+    ) {
+        let treasury_opt: Option<Address> = env.storage().instance().get(&DataKey::Treasury);
+        let fee_bps = Self::fee_bps(env);
+        let token_client = token::Client::new(env, &job.token);
+
+        if let Some(treasury) = treasury_opt {
+            if fee_bps > 0 && fee_bps <= 10_000 {
+                // fee_amount = amount * fee_bps / 10_000
+                let fee_amount = amount
+                    .checked_mul(fee_bps as i128)
+                    .unwrap()
+                    .checked_div(10_000)
+                    .unwrap();
+                let freelancer_amount = amount.checked_sub(fee_amount).unwrap();
+
+                if fee_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &treasury,
+                        &fee_amount,
+                    );
+                }
+                if freelancer_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &job.freelancer,
+                        &freelancer_amount,
+                    );
+                }
+                return;
+            }
+        }
+
+        // Default: no fee or fee is 0 or treasury not configured
+        token_client.transfer(
+            &env.current_contract_address(),
+            &job.freelancer,
+            &amount,
+        );
     }
 }
 
@@ -2343,9 +2432,9 @@ mod test {
         assert_eq!(job.status, EscrowStatus::Disputed);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // Comprehensive Escrow Deposit & Milestone Release Tests (>90% coverage)
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_deposit_success_transitions_to_funded() {
@@ -2726,9 +2815,9 @@ mod test {
         cc.release_milestone(&1u64, &client);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // Comprehensive Escrow Dispute & Resolution Tests (>90% coverage)
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_raise_dispute_by_freelancer_locks_funds() {
@@ -3126,9 +3215,9 @@ mod test {
         assert_eq!(job.released_amount, 0);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // SC-ESC-005: Token Decimals Compatibility
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_token_decimals_stored_on_deposit() {
@@ -3155,9 +3244,9 @@ mod test {
         assert_eq!(cc.get_token_decimals(&1u64), 7);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // SC-ESC-007: Instance Storage Optimisation
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_instance_config_getters() {
@@ -3194,9 +3283,9 @@ mod test {
         assert_eq!(cc.get_admin(), admin);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // SC-ESC-008: Double-Spending Prevention
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     #[should_panic(expected = "Error(Contract, #6)")]
@@ -3346,9 +3435,9 @@ mod test {
         cc.refund(&1u64, &client);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // SC-ESC-009: Dispute Timeout Enforcement
-    // ─────────────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_dispute_deadline_set_on_raise() {
