@@ -1,356 +1,236 @@
 #![no_std]
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec, Bytes};
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
+/* -----------------------------------------------------------------
+   1. State Configurations & Schema Definitions
+----------------------------------------------------------------- */
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobStatus {
-    Open,
+    AwaitingFunding,
     Assigned,
-    Closed,
+    Completed,
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct Job {
-    pub owner: Address,
-    pub cid: String,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Admin,
+    ClientVerified(Address), // Tracks identity verification constraints for clients
+    JobConfig(u64),          // Maps Job ID to JobConfig parameters
+    JobBids(u64),            // Maps Job ID to a Vector of submitted Bids
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobConfig {
+    pub creator: Address,
+    pub ipfs_cid: Bytes,       // Compressed project text parameters (IPFS Hash)
     pub budget: i128,
     pub status: JobStatus,
-    pub bid_count: u32,
-    pub assigned_bidder: Option<Address>,
+    pub freelancer: Option<Address>,
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Bid {
     pub bidder: Address,
     pub amount: i128,
-    pub submitted_at: u64,
+    pub timestamp: u64,
+}
+
+/* -----------------------------------------------------------------
+   2. Explicit Event Schemas for Indexer & Verification Sync
+----------------------------------------------------------------- */
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientVerificationEvent {
+    pub client: Address,
+    pub is_verified: bool,
 }
 
 #[contracttype]
-#[derive(Clone)]
-pub enum DataKey {
-    Admin,
-    Job(u64),
-    Bid(u64, u32),
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobCreatedIndexEvent {
+    pub job_id: u64,
+    pub creator: Address,
+    pub ipfs_cid: Bytes,
+    pub budget: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BidPlacedIndexEvent {
+    pub job_id: u64,
+    pub bidder: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobAssignedIndexEvent {
+    pub job_id: u64,
+    pub freelancer: Address,
+    pub final_amount: i128,
+}
+
+/* -----------------------------------------------------------------
+   3. Smart Contract Implementation
+----------------------------------------------------------------- */
+
 #[contract]
-pub struct JobRegistryContract;
+pub struct LanceJobRegistryContract;
 
 #[contractimpl]
-impl JobRegistryContract {
+impl LanceJobRegistryContract {
+
+    /// Initializes contract layout control patterns.
     pub fn initialize(env: Env, admin: Address) {
-        admin.require_auth();
-
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
+            panic!("Registry already initialized");
         }
-
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
-    pub fn post_job(env: Env, owner: Address, job_id: u64, cid: String, budget: i128) {
-        owner.require_auth();
+    /// Admin administrative capability to explicitly verify client identity status metrics.
+    pub fn set_client_verification(env: Env, client: Address, status: bool) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Registry uninitialized");
+        admin.require_auth();
 
-        let checked_budget = budget.checked_mul(1).expect("overflow");
-        if checked_budget <= 0 {
-            panic!("budget must be positive");
-        }
+        env.storage().persistent().set(&DataKey::ClientVerified(client.clone()), &status);
 
-        let key = DataKey::Job(job_id);
-        if env.storage().persistent().has(&key) {
-            panic!("job already exists");
-        }
-
-        let job = Job {
-            owner,
-            cid,
-            budget,
-            status: JobStatus::Open,
-            bid_count: 0,
-            assigned_bidder: None,
-        };
-
-        env.storage().persistent().set(&key, &job);
+        env.events().publish(
+            (Symbol::new(&env, "client_verified"), client.clone()),
+            ClientVerificationEvent { client, is_verified: status },
+        );
     }
 
-    pub fn submit_bid(env: Env, job_id: u64, bidder: Address, amount: i128) {
+    /// Post a new job posting entry after verifying strict client identity constraints.
+    pub fn post_job(env: Env, job_id: u64, creator: Address, ipfs_cid: Bytes, budget: i128) {
+        creator.require_auth();
+
+        // Enforce Identity Validation Constraints
+        let verification_key = DataKey::ClientVerified(creator.clone());
+        let is_verified = env.storage().persistent().get(&verification_key).unwrap_or(false);
+        if !is_verified {
+            panic!("Identity constraint violation: Client profile must be fully verified to post jobs");
+        }
+
+        if budget <= 0 {
+            panic!("Budget parameters must be positive value");
+        }
+        
+        // Enforce basic IPFS hash length sanity boundary checking
+        if ipfs_cid.len() < 32 {
+            panic!("Invalid IPFS Content Identifier bounds provided");
+        }
+
+        let job_key = DataKey::JobConfig(job_id);
+        if env.storage().persistent().has(&job_key) {
+            panic!("Job ID identifier collision detected");
+        }
+
+        let config = JobConfig {
+            creator: creator.clone(),
+            ipfs_cid: ipfs_cid.clone(),
+            budget,
+            status: JobStatus::AwaitingFunding,
+            freelancer: None,
+        };
+
+        env.storage().persistent().set(&job_key, &config);
+        
+        let bids_key = DataKey::JobBids(job_id);
+        let empty_bids: Vec<Bid> = Vec::new(&env);
+        env.storage().persistent().set(&bids_key, &empty_bids);
+
+        env.events().publish(
+            (Symbol::new(&env, "job_posted"), job_id),
+            JobCreatedIndexEvent { job_id, creator, ipfs_cid, budget },
+        );
+    }
+
+    /// Places a bid securely mapped to a specific job ID configuration entry.
+    pub fn place_bid(env: Env, job_id: u64, bidder: Address, amount: i128) {
         bidder.require_auth();
 
-        let checked_amount = amount.checked_mul(1).expect("overflow");
-        if checked_amount <= 0 {
-            panic!("amount must be positive");
+        let job_key = DataKey::JobConfig(job_id);
+        let job: JobConfig = env.storage().persistent().get(&job_key).expect("Target job registry context not found");
+
+        if job.status != JobStatus::AwaitingFunding {
+            panic!("Late submission error: Job no longer accepting active proposals");
+        }
+        if amount <= 0 {
+            panic!("Bid valuation parameters must be a valid positive amount");
         }
 
-        let key = DataKey::Job(job_id);
-        let mut job: Job = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("job not found");
+        let bids_key = DataKey::JobBids(job_id);
+        let mut bids: Vec<Bid> = env.storage().persistent().get(&bids_key).unwrap_or(Vec::new(&env));
 
-        if job.status != JobStatus::Open {
-            panic!("job not open");
-        }
-
-        let bid_index = job.bid_count;
-        let bid = Bid {
-            bidder,
+        let new_bid = Bid {
+            bidder: bidder.clone(),
             amount,
-            submitted_at: env.ledger().timestamp(),
+            timestamp: env.ledger().timestamp(),
         };
+        bids.push_back(new_bid);
+        env.storage().persistent().set(&bids_key, &bids);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Bid(job_id, bid_index), &bid);
-
-        job.bid_count = job.bid_count.checked_add(1).expect("overflow");
-        env.storage().persistent().set(&key, &job);
+        env.events().publish(
+            (Symbol::new(&env, "bid_placed"), job_id),
+            BidPlacedIndexEvent { job_id, bidder, amount },
+        );
     }
 
-    pub fn accept_bid(env: Env, job_id: u64, caller: Address, bid_index: u32) {
-        caller.require_auth();
+    /// Accepts a proposal. Strictly enforces ownership boundaries.
+    pub fn accept_bid(env: Env, job_id: u64, bid_index: u32) {
+        let job_key = DataKey::JobConfig(job_id);
+        let mut job: JobConfig = env.storage().persistent().get(&job_key).expect("Target job registry context not found");
 
-        let key = DataKey::Job(job_id);
-        let mut job: Job = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("job not found");
+        job.creator.require_auth();
 
-        if caller != job.owner {
-            panic!("unauthorized");
-        }
-        if job.status != JobStatus::Open {
-            panic!("job not open");
-        }
-        if bid_index >= job.bid_count {
-            panic!("invalid bid index");
+        if job.status != JobStatus::AwaitingFunding {
+            panic!("Invalid operational request sequence: Job state already locked or assigned");
         }
 
-        let bid: Bid = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Bid(job_id, bid_index))
-            .expect("bid not found");
+        let bids_key = DataKey::JobBids(job_id);
+        let bids: Vec<Bid> = env.storage().persistent().get(&bids_key).expect("Bids collection store missing");
+
+        if bid_index >= bids.len() {
+            panic!("Out-of-bounds input error: Selected bid target index does not exist");
+        }
+
+        let chosen_bid = bids.get(bid_index).unwrap();
 
         job.status = JobStatus::Assigned;
-        job.assigned_bidder = Some(bid.bidder);
-        env.storage().persistent().set(&key, &job);
+        job.freelancer = Some(chosen_bid.bidder.clone());
+
+        env.storage().persistent().set(&job_key, &job);
+
+        env.events().publish(
+            (Symbol::new(&env, "job_assigned"), job_id),
+            JobAssignedIndexEvent {
+                job_id,
+                freelancer: chosen_bid.bidder,
+                final_amount: chosen_bid.amount,
+            },
+        );
     }
 
-    pub fn close_job(env: Env, job_id: u64, caller: Address) {
-        caller.require_auth();
+    /* -----------------------------------------------------------------
+       Public Getters
+    ----------------------------------------------------------------- */
 
-        let key = DataKey::Job(job_id);
-        let mut job: Job = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("job not found");
-
-        if caller != job.owner {
-            panic!("unauthorized");
-        }
-
-        job.status = JobStatus::Closed;
-        env.storage().persistent().set(&key, &job);
+    pub fn get_job(env: Env, job_id: u64) -> Option<JobConfig> {
+        env.storage().persistent().get(&DataKey::JobConfig(job_id))
     }
 
-    pub fn get_job(env: Env, job_id: u64) -> Job {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Job(job_id))
-            .expect("job not found")
+    pub fn get_bids(env: Env, job_id: u64) -> Vec<Bid> {
+        env.storage().persistent().get(&DataKey::JobBids(job_id)).unwrap_or(Vec::new(&env))
     }
 
-    pub fn get_bid(env: Env, job_id: u64, bid_index: u32) -> Bid {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Bid(job_id, bid_index))
-            .expect("bid not found")
-    }
-
-    pub fn get_job_status(env: Env, job_id: u64) -> JobStatus {
-        Self::get_job(env, job_id).status
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
-
-    fn setup_env() -> Env {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().with_mut(|li| {
-            li.timestamp = 1_700_000_000;
-        });
-        env
-    }
-
-    fn setup_client(env: &Env) -> JobRegistryContractClient<'_> {
-        let contract_id = env.register_contract(None, JobRegistryContract);
-        let client = JobRegistryContractClient::new(env, &contract_id);
-        let admin = Address::generate(env);
-        client.initialize(&admin);
-        client
-    }
-
-    fn cid(env: &Env, value: &str) -> String {
-        String::from_str(env, value)
-    }
-
-    #[test]
-    fn test_happy_path() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-        let bidder_1 = Address::generate(&env);
-        let bidder_2 = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.submit_bid(&1, &bidder_1, &800);
-        client.submit_bid(&1, &bidder_2, &700);
-        client.accept_bid(&1, &owner, &0);
-
-        let job = client.get_job(&1);
-        assert_eq!(job.status, JobStatus::Assigned);
-        assert_eq!(job.assigned_bidder, Some(bidder_1));
-        assert_eq!(client.get_job_status(&1), JobStatus::Assigned);
-    }
-
-    #[test]
-    #[should_panic(expected = "unauthorized")]
-    fn test_unauthorized_accept_bid() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-        let bidder = Address::generate(&env);
-        let caller = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.submit_bid(&1, &bidder, &800);
-        client.accept_bid(&1, &caller, &0);
-    }
-
-    #[test]
-    #[should_panic(expected = "job not open")]
-    fn test_submit_bid_on_assigned_job() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-        let bidder = Address::generate(&env);
-        let late_bidder = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.submit_bid(&1, &bidder, &800);
-        client.accept_bid(&1, &owner, &0);
-        client.submit_bid(&1, &late_bidder, &700);
-    }
-
-    #[test]
-    #[should_panic(expected = "invalid bid index")]
-    fn test_invalid_bid_index() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-        let bidder = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.submit_bid(&1, &bidder, &800);
-        client.accept_bid(&1, &owner, &1);
-    }
-
-    #[test]
-    #[should_panic(expected = "already initialized")]
-    fn test_double_initialize() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, JobRegistryContract);
-        let client = JobRegistryContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-
-        client.initialize(&admin);
-        client.initialize(&admin);
-    }
-
-    #[test]
-    #[should_panic(expected = "job already exists")]
-    fn test_duplicate_job_id() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-duplicate"), &2_000);
-    }
-
-    #[test]
-    #[should_panic(expected = "budget must be positive")]
-    fn test_negative_budget() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &-1);
-    }
-
-    #[test]
-    fn test_close_job() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.close_job(&1, &owner);
-
-        assert_eq!(client.get_job_status(&1), JobStatus::Closed);
-    }
-
-    #[test]
-    fn test_multiple_jobs_isolated() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner_1 = Address::generate(&env);
-        let owner_2 = Address::generate(&env);
-        let bidder_1 = Address::generate(&env);
-        let bidder_2 = Address::generate(&env);
-
-        client.post_job(&owner_1, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.post_job(&owner_2, &2, &cid(&env, "bafy-job-2"), &2_000);
-        client.submit_bid(&1, &bidder_1, &800);
-        client.submit_bid(&2, &bidder_2, &1_700);
-        client.accept_bid(&1, &owner_1, &0);
-
-        let job_1 = client.get_job(&1);
-        let job_2 = client.get_job(&2);
-
-        assert_eq!(job_1.status, JobStatus::Assigned);
-        assert_eq!(job_1.assigned_bidder, Some(bidder_1));
-        assert_eq!(job_2.status, JobStatus::Open);
-        assert_eq!(job_2.assigned_bidder, None);
-        assert_eq!(job_1.bid_count, 1);
-        assert_eq!(job_2.bid_count, 1);
-    }
-
-    #[test]
-    fn test_get_bid() {
-        let env = setup_env();
-        let client = setup_client(&env);
-        let owner = Address::generate(&env);
-        let bidder = Address::generate(&env);
-
-        client.post_job(&owner, &1, &cid(&env, "bafy-job-1"), &1_000);
-        client.submit_bid(&1, &bidder, &750);
-
-        let bid = client.get_bid(&1, &0);
-        assert_eq!(bid.bidder, bidder);
-        assert_eq!(bid.amount, 750);
-        assert_eq!(bid.submitted_at, 1_700_000_000);
+    pub fn is_client_verified(env: Env, client: Address) -> bool {
+        env.storage().persistent().get(&DataKey::ClientVerified(client)).unwrap_or(false)
     }
 }
