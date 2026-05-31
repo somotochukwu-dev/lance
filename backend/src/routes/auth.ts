@@ -9,7 +9,17 @@ import { z } from "zod";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import Redis from "ioredis";
 
-import { prisma } from "../config/db";
+import { prisma as prismaGlobal } from "../config/db";
+
+// ---------------------------------------------------------------------------
+// Mutable db reference — swapped by createAuthRouter() for testing.
+// Route handlers reference `db` (the module-level binding), so reassigning
+// it transparently redirects all database operations to the injected client.
+// ---------------------------------------------------------------------------
+
+let db = prismaGlobal;
+
+let injectedRedisClient: Redis | null | undefined = undefined;
 
 const router = Router();
 
@@ -50,6 +60,9 @@ const COOKIE_BASE_OPTIONS = {
 let redisClient: Redis | null | undefined;
 
 function getRedisClient(): Redis | null {
+  if (injectedRedisClient !== undefined) {
+    return injectedRedisClient;
+  }
   if (redisClient !== undefined) {
     return redisClient;
   }
@@ -130,9 +143,26 @@ async function isSessionBlacklisted(token: string): Promise<boolean> {
 }
 
 async function cleanupExpiredSessions(now: Date): Promise<void> {
-  await prisma.sessions.deleteMany({
+  await db.sessions.deleteMany({
     where: { expires_at: { lte: now } },
   });
+}
+
+export async function isSessionRevoked(
+  redis: Redis,
+  token: string
+): Promise<boolean> {
+  try {
+    const result = await Promise.race([
+      redis.get(blacklistKeyForToken(token)),
+      new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), BLACKLIST_TIMEOUT_MS)
+      ),
+    ]);
+    return result !== null;
+  } catch {
+    return false;
+  }
 }
 
 export function sanitizeStellarAddress(
@@ -208,31 +238,6 @@ function extractSignatureString(
   }
 
   return null;
-/**
- * Safely decodes a signature from either hex or base64 format.
- * Enforces strict bounds checking: ed25519 signatures are exactly 64 bytes.
- * Rejects any signature that decodes to a length other than 64 bytes.
- */
-function decodeSignature(raw: string): Buffer {
-	const trimmed = raw.trim();
-	if (trimmed.length === 0) {
-		throw new Error("Signature cannot be empty");
-	}
-
-	let buf: Buffer;
-	if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
-		buf = Buffer.from(trimmed, "hex");
-	} else {
-		buf = Buffer.from(trimmed, "base64");
-	}
-
-	// ed25519 signatures are exactly 64 bytes — reject any other size.
-	if (buf.length !== 64) {
-		throw new Error(
-			`Invalid signature length: expected 64 bytes, got ${buf.length}`
-		);
-	}
-	return buf;
 }
 
 export function decodeSignature(
@@ -384,7 +389,7 @@ async function issueRefreshToken(
   previousTokenId?: number
 ): Promise<{ rawToken: string; hashedToken: string }> {
   if (previousTokenId !== undefined) {
-    await prisma.refresh_tokens.update({
+    await db.refresh_tokens.update({
       where: { id: previousTokenId },
       data: { revoked: true },
     });
@@ -403,7 +408,7 @@ async function issueRefreshToken(
     Date.now() + REFRESH_TOKEN_TTL_SEC * 1000
   );
 
-  await prisma.refresh_tokens.create({
+  await db.refresh_tokens.create({
     data: {
       token_hash: hashedToken,
       address,
@@ -496,7 +501,7 @@ router.post(
         Date.now() + CHALLENGE_TTL_MS
       );
 
-      await prisma.$transaction(async (tx) => {
+      await db.$transaction(async (tx) => {
         await tx.auth_challenges.deleteMany({
           where: {
             expires_at: { lte: new Date() },
@@ -572,7 +577,7 @@ router.post(
       }
 
       const challengeRecord =
-        await prisma.auth_challenges.findUnique({
+        await db.auth_challenges.findUnique({
           where: { address },
         });
 
@@ -583,7 +588,7 @@ router.post(
       }
 
       if (!isChallengeFresh(challengeRecord)) {
-        await prisma.auth_challenges
+        await db.auth_challenges
           .deleteMany({
             where: {
               address,
@@ -622,7 +627,7 @@ router.post(
       }
 
       const deleted =
-        await prisma.auth_challenges.deleteMany({
+        await db.auth_challenges.deleteMany({
           where: {
             address,
             challenge: challengeRecord.challenge,
@@ -652,7 +657,7 @@ router.post(
         Date.now() + SESSION_TTL_MS
       );
 
-      await prisma.sessions.create({
+      await db.sessions.create({
         data: {
           token: sessionToken,
           address,
@@ -690,95 +695,6 @@ router.post(
       });
     }
   }
-	"/verify",
-	async (req: Request<{}, {}, VerifyBody>, res: Response) => {
-		try {
-			const parsed = VerifyRequestSchema.safeParse(req.body);
-
-			if (!parsed.success) {
-				return res.status(400).json({ error: "Invalid request body" });
-			}
-
-			const address = sanitizeStellarAddress(parsed.data.address);
-
-			if (!address) {
-				return res.status(400).json({ error: "Invalid Stellar address" });
-			}
-
-			let signature = parsed.data.signature;
-
-			if (typeof signature === "object" && "signature" in signature) {
-				signature = signature.signature;
-			}
-
-			const challengeRecord = await prisma.auth_challenges.findUnique({
-				where: { address },
-			});
-
-			// Return 401 (not 404) to avoid leaking whether an address has a pending challenge.
-			if (!challengeRecord) {
-				return res.status(401).json({ error: "Invalid credentials" });
-			}
-
-			if (!isChallengeFresh(challengeRecord)) {
-				return res.status(401).json({ error: "Challenge expired" });
-			}
-
-			const isValid = verifyStellarSignature(
-				address,
-				challengeRecord.challenge,
-				signature
-			);
-
-			if (!isValid) {
-				return res.status(401).json({ error: "Invalid signature" });
-			}
-
-			// Atomically consume the challenge. count === 0 means another concurrent
-			// request already used it (TOCTOU guard).
-			const deleted = await prisma.auth_challenges.deleteMany({
-				where: {
-					address,
-					challenge: challengeRecord.challenge,
-					expires_at: { gt: new Date() },
-				},
-			});
-
-			if (deleted.count === 0) {
-				return res.status(401).json({ error: "Challenge already consumed" });
-			}
-
-			const accessJti = crypto.randomUUID();
-			const accessToken = issueAccessToken(address, accessJti);
-
-			const sessionToken = crypto.randomBytes(48).toString("base64url");
-			const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_SEC * 1000);
-
-			await prisma.sessions.create({
-				data: { token: sessionToken, address, expires_at: expiresAt },
-			});
-
-			res.cookie(ACCESS_TOKEN_COOKIE, accessToken, {
-				...COOKIE_BASE_OPTIONS,
-				maxAge: ACCESS_TOKEN_TTL_SEC * 1000,
-			});
-
-			res.cookie(REFRESH_TOKEN_COOKIE, sessionToken, {
-				...COOKIE_BASE_OPTIONS,
-				maxAge: REFRESH_TOKEN_TTL_SEC * 1000,
-			});
-
-			return res.status(200).json({
-				access_token: accessToken,
-				refresh_token: sessionToken,
-				token_type: "Bearer",
-				expires_in: ACCESS_TOKEN_TTL_SEC,
-			});
-		} catch (error) {
-			console.error("[auth/verify]", error);
-			return res.status(500).json({ error: "Internal server error" });
-		}
-	}
 );
 
 interface RefreshBody {
@@ -824,7 +740,7 @@ router.post(
         .digest("hex");
 
       const record =
-        await prisma.refresh_tokens.findUnique({
+        await db.refresh_tokens.findUnique({
           where: {
             token_hash: incomingHash,
           },
@@ -979,7 +895,7 @@ router.post(
           .update(refreshToken)
           .digest("hex");
 
-        await prisma.refresh_tokens
+        await db.refresh_tokens
           .updateMany({
             where: {
               token_hash: hash,
@@ -1069,7 +985,7 @@ router.get(
       const now = new Date();
 
       const session =
-        await prisma.sessions.findUnique({
+        await db.sessions.findUnique({
           where: { token },
         });
 
@@ -1103,5 +1019,34 @@ router.get(
     }
   }
 );
+
+/**
+ * createAuthRouter — returns the shared router with database and Redis
+ * dependencies overridden for testing.
+ *
+ * When `prismaClient` is provided, all route handlers use it instead of the
+ * global Prisma client.  When `redisClient` is explicitly provided (including
+ * `null`), the Redis-backed blacklist helpers use it instead.
+ *
+ * @example
+ * ```ts
+ * const router = createAuthRouter({
+ *   prismaClient: mockPrisma,
+ *   redisClient: null,
+ * });
+ * ```
+ */
+export function createAuthRouter(options: {
+  prismaClient?: typeof db;
+  redisClient?: Redis | null;
+}): Router {
+  if (options.prismaClient) {
+    db = options.prismaClient;
+  }
+  if (options.redisClient !== undefined) {
+    injectedRedisClient = options.redisClient;
+  }
+  return router;
+}
 
 export default router;
