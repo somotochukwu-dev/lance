@@ -35,10 +35,10 @@ pub enum JobRegistryError {
     JobExpired = 16,
     JobNotExpired = 17,
     InvalidCollateral = 18,
-    CollateralAlreadyReleased = 19,
+    BidWindowClosed = 19,
     CollateralNotFound = 20,
-    BidIndexOutOfBounds = 21,
-    BidWindowClosed = 22,
+    CollateralAlreadyReleased = 21,
+    BidIndexOutOfBounds = 22,
 }
  
 #[contracttype]
@@ -80,12 +80,13 @@ pub struct BidRecord {
     pub collateral_stroops: i128,
     pub collateral_released: bool,
 }
- 
+
 #[contracttype]
 pub enum DataKey {
     Admin,
     NextJobId,
     Job(u64),
+    Bids(u64),
     BidCount(u64),
     Bid(u64, u32),
     BidIndex(u64, Address),
@@ -864,7 +865,7 @@ fn is_valid_base58_char(c: u8) -> bool {
 }
 
 fn is_valid_base32_char(c: u8) -> bool {
-    matches!(c, b'A'..=b'Z' | b'2'..=b'7' | b'=')
+    matches!(c, b'a'..=b'z' | b'2'..=b'7')
 }
 
 fn validate_ipfs_cid(env: &Env, hash: &Bytes) {
@@ -958,48 +959,42 @@ fn post_job_with_id(
         .set(&DataKey::BidCount(job_id), &0u32);
 }
 
-fn release_collateral(env: &Env, job_id: u64, freelancer: Address, slash: bool) {
+fn release_collateral(env: &Env, job_id: u64, freelancer: Address, _slash: bool) {
+    let _job: JobRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Job(job_id))
+        .unwrap_or_else(|| panic_with_error!(env, JobRegistryError::JobNotFound));
+
     let bids_key = DataKey::Bids(job_id);
-    let mut bids: Vec<BidRecord> = env
+    let bids: Vec<BidRecord> = env
         .storage()
         .persistent()
         .get(&bids_key)
-        .unwrap_or_else(|| panic_with_error!(env, JobRegistryError::BidNotFound));
+        .unwrap_or_else(|| panic_with_error!(env, JobRegistryError::CollateralNotFound));
 
-    let mut updated = false;
-    for i in 0..bids.len() {
-        let mut bid = bids.get(i).unwrap();
+    let mut updated_bids: Vec<BidRecord> = Vec::new(env);
+    let mut found = false;
+
+    for bid in bids.iter() {
         if bid.freelancer == freelancer {
+            found = true;
             if bid.collateral_released {
-                panic_with_error!(
-                    env,
-                    JobRegistryError::CollateralAlreadyReleased
-                );
+                panic_with_error!(env, JobRegistryError::CollateralAlreadyReleased);
             }
-            bid.collateral_released = true;
-            bids.set(i, bid);
-            updated = true;
-            break;
+            let mut updated = bid.clone();
+            updated.collateral_released = true;
+            updated_bids.push_back(updated);
+        } else {
+            updated_bids.push_back(bid.clone());
         }
     }
 
-    if !updated {
-        panic_with_error!(env, JobRegistryError::BidNotFound);
+    if !found {
+        panic_with_error!(env, JobRegistryError::CollateralNotFound);
     }
 
-    env.storage().persistent().set(&bids_key, &bids);
-
-    if slash {
-        env.events().publish(
-            (symbol_short!("slash"), job_id),
-            freelancer,
-        );
-    } else {
-        env.events().publish(
-            (symbol_short!("release"), job_id),
-            freelancer,
-        );
-    }
+    env.storage().persistent().set(&bids_key, &updated_bids);
 }
 
 // NOTE: This test module predates several contract API changes (notably the
