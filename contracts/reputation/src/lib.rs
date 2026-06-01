@@ -359,9 +359,7 @@ impl ReputationContract {
             return score;
         }
 
-        let distance = (Self::DEFAULT_SCORE_BPS as i128)
-            .checked_sub(score as i128)
-            .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, ReputationError::ContractStateError));
+        let distance = (Self::DEFAULT_SCORE_BPS as i128) - (score as i128);
         let adjustment = distance
             .checked_mul(Self::RECOVERY_STEP_BPS as i128)
             .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, ReputationError::ContractStateError))
@@ -1218,6 +1216,31 @@ mod test {
         let recovered = adjuster.recover(&reputation_id, &target, &Role::Freelancer);
         assert_eq!(recovered, 3_200);
         assert_eq!(client.get_score(&target, &Role::Freelancer).score, 3_200);
+    }
+
+    #[test]
+    fn test_recover_moves_scores_above_default_back_down() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let target = Address::generate(&env);
+        let reputation_id = env.register_contract(None, ReputationContract);
+        let adjuster_id = env.register_contract(None, AuthorizedAdjuster);
+        let client = ReputationContractClient::new(&env, &reputation_id);
+        let adjuster = AuthorizedAdjusterClient::new(&env, &adjuster_id);
+
+        client.initialize(&admin);
+        client.set_authorized_contract(&admin, &adjuster_id);
+
+        env.ledger().set_timestamp(200);
+        adjuster.award(&reputation_id, &target, &Role::Freelancer, &2_000);
+        assert_eq!(client.get_score(&target, &Role::Freelancer).score, 7_000);
+
+        env.ledger().set_timestamp(200 + 30 * 24 * 60 * 60);
+        let recovered = adjuster.recover(&reputation_id, &target, &Role::Freelancer);
+        assert_eq!(recovered, 6_800);
+        assert_eq!(client.get_score(&target, &Role::Freelancer).score, 6_800);
     }
 
     #[test]
