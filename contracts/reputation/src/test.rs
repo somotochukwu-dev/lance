@@ -4,7 +4,7 @@ use crate::{
     AuthorizedCaller, BadgeLevel, ReputationContract, ReputationError, Role,
 };
 use soroban_sdk::{Address, Env, String};
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 
 #[test]
 fn test_fixed_point_zero_division_protection() {
