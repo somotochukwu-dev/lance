@@ -91,7 +91,6 @@ pub enum DataKey {
     Bid(u64, u32),
     BidIndex(u64, Address),
     Deliverable(u64),
-    Bids(u64),
 }
  
 #[contract]
