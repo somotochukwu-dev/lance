@@ -78,13 +78,11 @@ test("performs Redis blacklist lookups with a 1ms timeout budget", async () => {
   };
   const startedAt = performance.now();
   assert.equal(await auth.isSessionRevoked(slowRedis as any, "token-b"), false);
-  // Even though the redis call would take 25ms, the 5ms timeout budget
-  // cuts it off — ensure it resolves well before the 25ms mark.
-  const elapsed = performance.now() - startedAt;
-  assert.ok(elapsed < 100, `Expected < 100ms, got ${elapsed.toFixed(1)}ms`);
+  assert.ok(performance.now() - startedAt < 50, `elapsed: ${performance.now() - startedAt}ms`);
 });
 
 test("auth router returns 401 for bad signatures and consumes valid challenges once", async () => {
+  process.env.JWT_SECRET = "test-secret-minimum-32-characters!!";
   const express = require("express") as typeof import("express");
   const keypair = Keypair.random();
   const address = keypair.publicKey();
@@ -100,16 +98,24 @@ test("auth router returns 401 for bad signatures and consumes valid challenges o
   app.use(express.json());
   app.use("/auth", auth.createAuthRouter({
     prismaClient: {
-      $transaction: async (fn: any) => fn({
+      $transaction: async (fn: (tx: any) => any) => fn({
         auth_challenges: {
-          deleteMany: async () => ({ count: 0 }),
+          deleteMany: async (opts: any) => {
+            const where = opts.where;
+            if (storedRecord && storedRecord.address === where.address && storedRecord.challenge === where.challenge && storedRecord.expires_at > where.expires_at.gt) {
+              storedRecord = null;
+              return { count: 1 };
+            }
+            return { count: 0 };
+          },
           upsert: async () => record,
         },
       }),
       auth_challenges: {
         upsert: async () => record,
         findUnique: async () => storedRecord,
-        deleteMany: async ({ where }: any) => {
+        deleteMany: async (opts: any) => {
+          const where = opts.where;
           if (storedRecord && storedRecord.address === where.address && storedRecord.challenge === where.challenge && storedRecord.expires_at > where.expires_at.gt) {
             storedRecord = null;
             return { count: 1 };
@@ -118,23 +124,15 @@ test("auth router returns 401 for bad signatures and consumes valid challenges o
         },
       },
       refresh_tokens: {
-        create: async ({ data }: any) => {
-          const id = rtId++;
-          const row = { id, ...data };
-          refreshTokens.set(data.token_hash, row);
-          return row;
-        },
-        findUnique: async ({ where }: any) => refreshTokens.get(where.token_hash) ?? null,
-        update: async ({ where, data }: any) => {
-          const row = refreshTokens.get(where.token_hash);
-          if (row) Object.assign(row, data);
-          return row;
-        },
+        create: async (opts: any) => ({ id: 1, ...opts.data }),
+        findUnique: async () => null,
+        update: async () => ({}),
+        updateMany: async () => ({ count: 0 }),
       },
       sessions: {
-        create: async ({ data }: any) => { sessions.set(data.token, data); return data; },
-        findUnique: async ({ where }: any) => sessions.get(where.token) ?? null,
-        deleteMany: async ({ where }: any) => ({ count: sessions.delete(where.token) ? 1 : 0 }),
+        create: async (opts: any) => { const data = opts.data; sessions.set(data.token, data); return data; },
+        findUnique: async (opts: any) => sessions.get(opts.where.token) ?? null,
+        deleteMany: async (opts: any) => ({ count: sessions.delete(opts.where.token) ? 1 : 0 }),
       },
     },
     redisClient: null,
